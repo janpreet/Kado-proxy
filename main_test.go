@@ -1,25 +1,203 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
-func generateTestCert() (tls.Certificate, error) {
+func TestLoadConfig(t *testing.T) {
+	os.Setenv("GITHUB_APP_ID", "test-app-id")
+	os.Setenv("GITHUB_APP_PRIVATE_KEY", "test-private-key")
+	os.Setenv("GITHUB_INSTALLATION_ID", "12345")
+
+	oldArgs := os.Args
+	os.Args = []string{"cmd", "-cert=test.crt", "-key=test.key", "-port=8080"}
+	config, err := loadConfig()
+	os.Args = oldArgs
+
+	assert.NoError(t, err)
+	assert.Equal(t, "test-app-id", config.GithubAppID)
+	assert.Equal(t, []byte("test-private-key"), config.GithubAppKey)
+	assert.Equal(t, int64(12345), config.InstallationID)
+	assert.Equal(t, "test.crt", config.CertFile)
+	assert.Equal(t, "test.key", config.KeyFile)
+	assert.Equal(t, 8080, config.Port)
+
+	os.Args = []string{"cmd"}
+	_, err = loadConfig()
+	assert.Error(t, err)
+}
+
+func TestGenerateJWT(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	assert.NoError(t, err)
+
+	pemdata := pem.EncodeToMemory(
+		&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+		},
+	)
+
+	jwt, err := generateJWT("test-app-id", pemdata)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, jwt)
+
+	_, err = generateJWT("test-app-id", []byte("invalid-key"))
+	assert.Error(t, err)
+}
+
+type mockHTTPClient struct {
+	mock.Mock
+}
+
+func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	args := m.Called(req)
+	return args.Get(0).(*http.Response), args.Error(1)
+}
+
+func TestGetInstallationToken(t *testing.T) {
+	mockClient := new(mockHTTPClient)
+
+	mockResponse := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewBufferString(`{"token": "test-token"}`)),
+	}
+	mockClient.On("Do", mock.Anything).Return(mockResponse, nil)
+
+	token, err := getInstallationToken("test-jwt", 12345)
+	assert.NoError(t, err)
+	assert.Equal(t, "test-token", token)
+
+	mockErrorResponse := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       io.NopCloser(bytes.NewBufferString(`{"message": "Bad request"}`)),
+	}
+	mockClient.On("Do", mock.Anything).Return(mockErrorResponse, nil)
+
+	_, err = getInstallationToken("test-jwt", 12345)
+	assert.Error(t, err)
+}
+
+func TestHandleRequest(t *testing.T) {
+	config := &Config{
+		GithubAppID:    "test-app-id",
+		GithubAppKey:   []byte("test-private-key"),
+		InstallationID: 12345,
+	}
+
+	target, _ := url.Parse(githubAPIURL)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+
+	handleRequest(w, req, config, proxy)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, req.Header.Get("Authorization"), "token ")
+
+	for i := 0; i < 10; i++ {
+		w = httptest.NewRecorder()
+		handleRequest(w, req, config, proxy)
+	}
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	config.GithubAppID = ""
+	config.GithubAppKey = nil
+	req.Header.Set("Authorization", "Bearer test-token")
+	w = httptest.NewRecorder()
+
+	handleRequest(w, req, config, proxy)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "Bearer test-token", req.Header.Get("Authorization"))
+}
+
+func TestModifyResponse(t *testing.T) {
+	rateLimitResp := RateLimitResponse{}
+	rateLimitResp.Resources.Core.Limit = 5000
+	rateLimitResp.Resources.Core.Remaining = 0
+	rateLimitResp.Resources.Core.Reset = int(time.Now().Add(time.Hour).Unix())
+
+	body, _ := json.Marshal(rateLimitResp)
+
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Body:       io.NopCloser(bytes.NewBuffer(body)),
+	}
+
+	err := modifyResponse(resp)
+
+	assert.NoError(t, err)
+
+	resp = &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewBufferString("OK")),
+	}
+
+	err = modifyResponse(resp)
+
+	assert.NoError(t, err)
+}
+
+func TestSetupServer(t *testing.T) {
+	config := &Config{
+		GithubAppID:    "test-app-id",
+		GithubAppKey:   []byte("test-private-key"),
+		InstallationID: 12345,
+		CertFile:       "test.crt",
+		KeyFile:        "test.key",
+		Port:           8443,
+	}
+
+	server, err := setupServer(config)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, server)
+	assert.Equal(t, ":8443", server.Addr)
+}
+
+func TestMain(t *testing.T) {
+	os.Setenv("GITHUB_APP_ID", "test-app-id")
+	os.Setenv("GITHUB_APP_PRIVATE_KEY", "test-private-key")
+	os.Setenv("GITHUB_INSTALLATION_ID", "12345")
+
+	oldArgs := os.Args
+	os.Args = []string{"cmd", "-cert=test.crt", "-key=test.key", "-port=8443"}
+
+	config, err := loadConfig()
+	assert.NoError(t, err)
+	
+	server, err := setupServer(config)
+	assert.NoError(t, err)
+	assert.NotNil(t, server)
+
+	os.Args = oldArgs
+}
+
+func generateTestCert() ([]byte, []byte, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 
 	template := x509.Certificate{
@@ -36,145 +214,11 @@ func generateTestCert() (tls.Certificate, error) {
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-
-	return cert, nil
-}
-
-func TestHandler(t *testing.T) {
-	cert, err := generateTestCert()
-	if err != nil {
-		t.Fatalf("Failed to generate test certificate: %v", err)
-	}
-
-	mockGitHub := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Mock GitHub Response"))
-	}))
-	mockGitHub.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
-	mockGitHub.StartTLS()
-	defer mockGitHub.Close()
-
-	originalURL := githubAPIURL
-	githubAPIURL := mockGitHub.URL
-	defer func() { githubAPIURL = originalURL }()
-
-	target, _ := url.Parse(githubAPIURL)
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	proxy.ModifyResponse = modifyResponse
-
-	handler := handler(proxy)
-
-	tests := []struct {
-		name           string
-		method         string
-		path           string
-		expectedStatus int
-	}{
-		{"GET Request", "GET", "/", http.StatusOK},
-		{"POST Request", "POST", "/", http.StatusOK},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req, err := http.NewRequest(tt.method, tt.path, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			rr := httptest.NewRecorder()
-			handler(rr, req)
-
-			if status := rr.Code; status != tt.expectedStatus {
-				t.Errorf("handler returned wrong status code: got %v want %v", status, tt.expectedStatus)
-			}
-		})
-	}
-}
-
-func TestRateLimiting(t *testing.T) {
-	cert, err := generateTestCert()
-	if err != nil {
-		t.Fatalf("Failed to generate test certificate: %v", err)
-	}
-
-	mockGitHub := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Mock GitHub Response"))
-	}))
-	mockGitHub.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
-	mockGitHub.StartTLS()
-	defer mockGitHub.Close()
-
-	originalURL := githubAPIURL
-	githubAPIURL := mockGitHub.URL
-	defer func() { githubAPIURL = originalURL }()
-
-	target, _ := url.Parse(githubAPIURL)
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	proxy.ModifyResponse = modifyResponse
-
-	handler := handler(proxy)
-
-	req, _ := http.NewRequest("GET", "/", nil)
-	rr := httptest.NewRecorder()
-
-	start := time.Now()
-	for i := 0; i < 10; i++ {
-		handler(rr, req)
-	}
-	duration := time.Since(start)
-
-	if duration < time.Second {
-		t.Errorf("Rate limiting not working as expected: 10 requests took %v, expected at least 1s", duration)
-	}
-}
-
-func TestHTTPSServer(t *testing.T) {
-	cert, err := generateTestCert()
-	if err != nil {
-		t.Fatalf("Failed to generate test certificate: %v", err)
-	}
-
-	target, _ := url.Parse(githubAPIURL)
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.ModifyResponse = modifyResponse
-
-	server := httptest.NewUnstartedServer(http.HandlerFunc(handler(proxy)))
-	server.TLS = &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	}
-	server.StartTLS()
-	defer server.Close()
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
-
-	resp, err := client.Get(server.URL)
-	if err != nil {
-		t.Fatalf("Failed to make request to test server: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status OK, got %v", resp.Status)
-	}
+	return certPEM, keyPEM, nil
 }
