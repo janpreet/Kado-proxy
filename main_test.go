@@ -10,10 +10,10 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"testing"
 	"time"
-	"net/http/httputil"
 )
 
 func generateTestCert() (tls.Certificate, error) {
