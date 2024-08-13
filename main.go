@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -43,68 +44,58 @@ type RateLimitResponse struct {
 	} `json:"resources"`
 }
 
-type Config struct {
-	GithubAppID    string
-	GithubAppKey   []byte
-	InstallationID int64
-	CertFile       string
-	KeyFile        string
-	Port           int
-}
-
 func init() {
+	githubAppID = os.Getenv("GITHUB_APP_ID")
+	githubAppKey = []byte(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
+	installationID, _ = strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
 	flag.StringVar(&certFile, "cert", "", "Path to TLS certificate file")
 	flag.StringVar(&keyFile, "key", "", "Path to TLS key file")
 	flag.IntVar(&port, "port", 8443, "Port to run the server on")
 }
 
-func loadConfig(fs *flag.FlagSet, args []string) (*Config, error) {
-	var certFile, keyFile string
-	var port int
-
-	fs.StringVar(&certFile, "cert", "", "Path to TLS certificate file")
-	fs.StringVar(&keyFile, "key", "", "Path to TLS key file")
-	fs.IntVar(&port, "port", 8443, "Port to run the server on")
-
-	if err := fs.Parse(args); err != nil {
-		return nil, err
-	}
-
-	githubAppID := os.Getenv("GITHUB_APP_ID")
-	githubAppKey := []byte(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
-	installationID, _ := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
+func main() {
+	flag.Parse()
 
 	if certFile == "" || keyFile == "" {
-		return nil, fmt.Errorf("TLS certificate and key files are required")
+		log.Fatal("TLS certificate and key files are required")
 	}
 
-	return &Config{
-		GithubAppID:    githubAppID,
-		GithubAppKey:   githubAppKey,
-		InstallationID: installationID,
-		CertFile:       certFile,
-		KeyFile:        keyFile,
-		Port:           port,
-	}, nil
+	target, err := url.Parse(githubAPIURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = modifyResponse
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: http.HandlerFunc(handler(proxy)),
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+
+	log.Printf("Starting kado-proxy HTTPS server on :%d\n", port)
+	log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
 }
 
-
-func generateJWT(appID string, privateKey []byte) (string, error) {
+func generateJWT() (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(10 * time.Minute).Unix(),
-		"iss": appID,
+		"iss": githubAppID,
 	})
 
-	key, err := jwt.ParseRSAPrivateKeyFromPEM(privateKey)
+	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM(githubAppKey)
 	if err != nil {
 		return "", err
 	}
 
-	return token.SignedString(key)
+	return token.SignedString(privateKey)
 }
 
-func getInstallationToken(jwt string, installationID int64) (string, error) {
+func getInstallationToken(jwt string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
@@ -121,7 +112,7 @@ func getInstallationToken(jwt string, installationID int64) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -139,32 +130,36 @@ func getInstallationToken(jwt string, installationID int64) (string, error) {
 	return token, nil
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, config *Config, proxy *httputil.ReverseProxy) {
-	if err := limiter.Wait(r.Context()); err != nil {
-		http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
-		return
-	}
-
-	if config.GithubAppID != "" && len(config.GithubAppKey) > 0 {
-		jwt, err := generateJWT(config.GithubAppID, config.GithubAppKey)
-		if err != nil {
-			http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
+func handler(p *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := limiter.Wait(r.Context()); err != nil {
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 
-		token, err := getInstallationToken(jwt, config.InstallationID)
-		if err != nil {
-			http.Error(w, "Failed to get installation token", http.StatusInternalServerError)
-			return
+		// Check if we're using a GitHub App
+		if githubAppID != "" && len(githubAppKey) > 0 {
+			jwt, err := generateJWT()
+			if err != nil {
+				http.Error(w, "Failed to generate JWT", http.StatusInternalServerError)
+				return
+			}
+
+			token, err := getInstallationToken(jwt)
+			if err != nil {
+				http.Error(w, "Failed to get installation token", http.StatusInternalServerError)
+				return
+			}
+
+			r.Header.Set("Authorization", "token "+token)
+		} else if auth := r.Header.Get("Authorization"); auth != "" {
+			// If not using a GitHub App, forward the existing Authorization header
+			r.Header.Set("Authorization", auth)
 		}
 
-		r.Header.Set("Authorization", "token "+token)
-	} else if auth := r.Header.Get("Authorization"); auth != "" {
-		r.Header.Set("Authorization", auth)
+		r.Host = "api.github.com"
+		p.ServeHTTP(w, r)
 	}
-
-	r.Host = "api.github.com"
-	proxy.ServeHTTP(w, r)
 }
 
 func modifyResponse(r *http.Response) error {
@@ -194,43 +189,4 @@ func modifyResponse(r *http.Response) error {
 	}
 
 	return nil
-}
-
-func setupServer(config *Config) (*http.Server, error) {
-	target, err := url.Parse(githubAPIURL)
-	if err != nil {
-		return nil, err
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.ModifyResponse = modifyResponse
-
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, config, proxy)
-	}
-
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", config.Port),
-		Handler: http.HandlerFunc(handler),
-		TLSConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
-	}
-
-	return server, nil
-}
-
-func main() {
-	config, err := loadConfig(flag.CommandLine, os.Args[1:])
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	server, err := setupServer(config)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("Starting kado-proxy HTTPS server on :%d\n", config.Port)
-	log.Fatal(server.ListenAndServeTLS(config.CertFile, config.KeyFile))
 }
