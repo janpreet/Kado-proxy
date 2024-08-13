@@ -10,7 +10,17 @@ import (
 )
 
 func TestHandler(t *testing.T) {
-	target, _ := url.Parse("https://api.github.com")
+	mockGitHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Mock GitHub Response"))
+	}))
+	defer mockGitHub.Close()
+
+	originalURL := githubAPIURL
+	githubAPIURL := mockGitHub.URL
+	defer func() { githubAPIURL = originalURL }()
+
+	target, _ := url.Parse(githubAPIURL)
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ModifyResponse = modifyResponse
 
@@ -44,7 +54,17 @@ func TestHandler(t *testing.T) {
 }
 
 func TestRateLimiting(t *testing.T) {
-	target, _ := url.Parse("https://api.github.com")
+	mockGitHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Mock GitHub Response"))
+	}))
+	defer mockGitHub.Close()
+
+	originalURL := githubAPIURL
+	githubAPIURL := mockGitHub.URL
+	defer func() { githubAPIURL = originalURL }()
+
+	target, _ := url.Parse(githubAPIURL)
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ModifyResponse = modifyResponse
 

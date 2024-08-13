@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	githubAPIURL = "https://api.github.com"
 	proxyPort    = 8080
 )
+
+var githubAPIURL = "https://api.github.com"
 
 var limiter = rate.NewLimiter(rate.Every(time.Hour/5000), 1) // 5000 requests per hour
 
