@@ -1,4 +1,6 @@
-[![kado-proxy CI/CD](https://github.com/janpreet/kado-proxy/actions/workflows/kado-proxy.yaml/badge.svg)](https://github.com/janpreet/kado-proxy/actions/workflows/kado-proxy.yaml)[![Go Report Card](https://goreportcard.com/badge/github.com/janpreet/kado-proxy)](https://goreportcard.com/report/github.com/janpreet/kado-proxy)
+[![kado-proxy CI/CD](https://github.com/janpreet/kado-proxy/actions/workflows/kado-proxy.yaml/badge.svg)](https://github.com/janpreet/kado-proxy/actions/workflows/kado-proxy.yaml)
+[![codecov](https://codecov.io/github/janpreet/kado-proxy/graph/badge.svg?token=5MBY4JIT88)](https://codecov.io/github/janpreet/kado-proxy)
+[![Go Report Card](https://goreportcard.com/badge/github.com/janpreet/kado-proxy)](https://goreportcard.com/report/github.com/janpreet/kado-proxy)
 # kado-proxy
 
 kado-proxy is a lightweight, Go-based proxy designed to sit between your tools and the GitHub API. It helps manage API rate limits and handles authentication, ensuring your applications can interact with GitHub more reliably and securely.
