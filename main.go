@@ -58,14 +58,21 @@ func init() {
 	flag.IntVar(&port, "port", 8443, "Port to run the server on")
 }
 
-func loadConfig() (*Config, error) {
-	if !flag.Parsed() {
-		flag.Parse()
+func loadConfig(fs *flag.FlagSet, args []string) (*Config, error) {
+	var certFile, keyFile string
+	var port int
+
+	fs.StringVar(&certFile, "cert", "", "Path to TLS certificate file")
+	fs.StringVar(&keyFile, "key", "", "Path to TLS key file")
+	fs.IntVar(&port, "port", 8443, "Port to run the server on")
+
+	if err := fs.Parse(args); err != nil {
+		return nil, err
 	}
 
-	githubAppID = os.Getenv("GITHUB_APP_ID")
-	githubAppKey = []byte(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
-	installationID, _ = strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
+	githubAppID := os.Getenv("GITHUB_APP_ID")
+	githubAppKey := []byte(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
+	installationID, _ := strconv.ParseInt(os.Getenv("GITHUB_INSTALLATION_ID"), 10, 64)
 
 	if certFile == "" || keyFile == "" {
 		return nil, fmt.Errorf("TLS certificate and key files are required")
@@ -80,6 +87,7 @@ func loadConfig() (*Config, error) {
 		Port:           port,
 	}, nil
 }
+
 
 func generateJWT(appID string, privateKey []byte) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
@@ -213,7 +221,7 @@ func setupServer(config *Config) (*http.Server, error) {
 }
 
 func main() {
-	config, err := loadConfig()
+	config, err := loadConfig(flag.CommandLine, os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
 	}

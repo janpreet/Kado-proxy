@@ -27,11 +27,9 @@ func TestLoadConfig(t *testing.T) {
 	os.Setenv("GITHUB_APP_PRIVATE_KEY", "test-private-key")
 	os.Setenv("GITHUB_INSTALLATION_ID", "12345")
 
-	oldArgs := os.Args
-	os.Args = []string{"cmd", "-cert=test.crt", "-key=test.key", "-port=8080"}
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError) // Reset flags
-	config, err := loadConfig()
-	os.Args = oldArgs
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	args := []string{"-cert=test.crt", "-key=test.key", "-port=8080"}
+	config, err := loadConfig(fs, args)
 
 	assert.NoError(t, err)
 	assert.Equal(t, "test-app-id", config.GithubAppID)
@@ -41,12 +39,15 @@ func TestLoadConfig(t *testing.T) {
 	assert.Equal(t, "test.key", config.KeyFile)
 	assert.Equal(t, 8080, config.Port)
 
-	os.Args = []string{"cmd"}
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError) // Reset flags
-	_, err = loadConfig()
+	fs = flag.NewFlagSet("test", flag.ContinueOnError)
+	args = []string{"-port=8080"}
+	_, err = loadConfig(fs, args)
 	assert.Error(t, err)
 
-	os.Args = oldArgs
+	fs = flag.NewFlagSet("test", flag.ContinueOnError)
+	args = []string{"-invalid=flag"}
+	_, err = loadConfig(fs, args)
+	assert.Error(t, err)
 }
 
 func TestGenerateJWT(t *testing.T) {
@@ -185,17 +186,16 @@ func TestMain(t *testing.T) {
 	os.Setenv("GITHUB_APP_PRIVATE_KEY", "test-private-key")
 	os.Setenv("GITHUB_INSTALLATION_ID", "12345")
 
-	oldArgs := os.Args
-	os.Args = []string{"cmd", "-cert=test.crt", "-key=test.key", "-port=8443"}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	args := []string{"-cert=test.crt", "-key=test.key", "-port=8443"}
 
-	config, err := loadConfig()
+	config, err := loadConfig(fs, args)
 	assert.NoError(t, err)
 	
 	server, err := setupServer(config)
 	assert.NoError(t, err)
 	assert.NotNil(t, server)
 
-	os.Args = oldArgs
 }
 
 func generateTestCert() ([]byte, []byte, error) {
