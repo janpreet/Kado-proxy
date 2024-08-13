@@ -17,7 +17,7 @@ import (
 	"os"
 	"testing"
 	"time"
-
+	"flag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -29,6 +29,7 @@ func TestLoadConfig(t *testing.T) {
 
 	oldArgs := os.Args
 	os.Args = []string{"cmd", "-cert=test.crt", "-key=test.key", "-port=8080"}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError) // Reset flags
 	config, err := loadConfig()
 	os.Args = oldArgs
 
@@ -41,8 +42,11 @@ func TestLoadConfig(t *testing.T) {
 	assert.Equal(t, 8080, config.Port)
 
 	os.Args = []string{"cmd"}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError) // Reset flags
 	_, err = loadConfig()
 	assert.Error(t, err)
+
+	os.Args = oldArgs
 }
 
 func TestGenerateJWT(t *testing.T) {

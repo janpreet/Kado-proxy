@@ -52,11 +52,16 @@ type Config struct {
 	Port           int
 }
 
-func loadConfig() (*Config, error) {
+func init() {
 	flag.StringVar(&certFile, "cert", "", "Path to TLS certificate file")
 	flag.StringVar(&keyFile, "key", "", "Path to TLS key file")
 	flag.IntVar(&port, "port", 8443, "Port to run the server on")
-	flag.Parse()
+}
+
+func loadConfig() (*Config, error) {
+	if !flag.Parsed() {
+		flag.Parse()
+	}
 
 	githubAppID = os.Getenv("GITHUB_APP_ID")
 	githubAppKey = []byte(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
